@@ -1,0 +1,11 @@
+name = "kadr-feedback"
+main = "worker.mjs"
+compatibility_date = "2026-11-19"
+workers_dev = true
+
+[vars]
+GITHUB_REPO = "ultrozing-ops/kadr-feedback"
+GITHUB_ISSUE = "1"
+GITHUB_AUTHOR_ID = "242692075"
+GITHUB_IMAGE_BRANCH = "main"
+KADR_AUTHOR_NAME = "Павлюк А.И."
