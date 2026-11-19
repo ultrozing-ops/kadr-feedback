@@ -198,7 +198,7 @@ function safeMarkdown(text) {
 }
 
 function commentBody(data, cfg) {
-    const heading = data.author ? safeMarkdown(cfg.authorName) + " · автор" : safeMarkdown(data.name) + " · участник КАДРа";
+    const heading = data.author ? safeMarkdown(cfg.authorName) : safeMarkdown(data.name) + " · участник КАДРа";
     const image = data.image ? "\n\n![Скриншот](" + rawImage(cfg, data.image) + ")" : "";
     return PREFIX + encodedMetadata(data) + " -->\n**" + heading + "**\n\n" + safeMarkdown(data.body) + image;
 }
@@ -321,12 +321,41 @@ async function publish(request, cfg, author) {
     }
 }
 
+const PRESENCE_TTL_MS = 65000;
+async function updatePresence(request, db, cfg, author, leaving) {
+    check(db, 503);
+    const payload = await body(request);
+    check(typeof payload.session === "string" && KEY.test(payload.session), 400);
+    const key = await hex("SHA-256", encode.encode(request.headers.get("Authorization") + ":" + payload.session));
+    const now = Date.now();
+    await db.prepare(
+        "CREATE TABLE IF NOT EXISTS kadr_presence (session TEXT PRIMARY KEY, name TEXT NOT NULL, expires_at INTEGER NOT NULL)"
+    ).run();
+    if (leaving) {
+        await db.prepare("DELETE FROM kadr_presence WHERE session = ?").bind(key).run();
+        return json({ online: [] });
+    }
+    const name = author ? cfg.authorName : typeof payload.name === "string" ? payload.name.trim() : "";
+    check(nameOk(name) && (author || name.toLowerCase() !== cfg.authorName.toLowerCase()), 400);
+    const results = await db.batch([
+        db.prepare("DELETE FROM kadr_presence WHERE expires_at <= ?").bind(now),
+        db.prepare(
+            "INSERT INTO kadr_presence (session, name, expires_at) VALUES (?, ?, ?) " +
+            "ON CONFLICT(session) DO UPDATE SET name = excluded.name, expires_at = excluded.expires_at"
+        ).bind(key, name, now + PRESENCE_TTL_MS),
+        db.prepare("SELECT DISTINCT name FROM kadr_presence WHERE expires_at > ? ORDER BY name LIMIT 100").bind(now),
+    ]);
+    return json({ online: results[2].results.map(row => row.name).sort((a, b) => a.localeCompare(b, "ru")) });
+}
+
 export default {
     async fetch(request, env) {
         try {
             const cfg = settings(env);
             const author = authorize(request, cfg);
             const url = new URL(request.url);
+            if (request.method === "POST" && (url.pathname === "/presence" || url.pathname === "/presence/leave"))
+                return await updatePresence(request, env.CHAT_PRESENCE, cfg, author, url.pathname.endsWith("/leave"));
             if (url.pathname === "/messages") {
                 if (request.method === "GET") return await historyResponse(cfg, integer(url.searchParams.get("after") ?? "0"));
                 if (request.method === "POST") return await publish(request, cfg, author);
