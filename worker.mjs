@@ -10,9 +10,10 @@ const encode = new TextEncoder();
 const decode = new TextDecoder("utf-8", { fatal: true });
 
 class Failure extends Error {
-    constructor(status) {
+    constructor(status, upstream = 0) {
         super(String(status));
         this.status = status;
+        this.upstream = upstream;
     }
 }
 
@@ -61,7 +62,7 @@ function authorize(request, cfg) {
     return false;
 }
 
-function github(path, cfg, request = {}) {
+async function github(path, cfg, request = {}) {
     const headers = {
         Accept: "application/vnd.github+json",
         Authorization: "Bearer " + cfg.token,
@@ -69,13 +70,26 @@ function github(path, cfg, request = {}) {
         "X-GitHub-Api-Version": VERSION,
     };
     if (request.body) headers["Content-Type"] = "application/json";
-    return fetch("https://api.github.com" + path, { ...request, headers, redirect: "error" });
+    try {
+        return await fetch("https://api.github.com" + path, { ...request, headers, redirect: "manual" });
+    } catch (error) {
+        const failure = new Failure(502);
+        const message = String(error?.message || "");
+        failure.reason = /^[a-zA-Z0-9 .,:()/-]{1,160}$/.test(message) ? message : "GitHub request failed";
+        throw failure;
+    }
 }
 
 async function githubJson(path, cfg, request) {
     const response = await github(path, cfg, request);
-    check(response.ok, response.status === 409 || response.status === 422 ? 503 : 502);
-    return response.json();
+    if (!response.ok) throw new Failure(response.status === 409 || response.status === 422 ? 503 : 502, response.status);
+    try {
+        return await response.json();
+    } catch {
+        const failure = new Failure(502, response.status);
+        failure.reason = "GitHub response was not JSON";
+        throw failure;
+    }
 }
 
 async function body(request) {
@@ -288,7 +302,7 @@ async function imageResponse(cfg, id) {
     const message = readMetadata(comment, cfg);
     check(message?.image, 404);
     // Public file endpoint. Never forward the GitHub token here.
-    const response = await fetch(rawImage(cfg, message.image), { redirect: "error" });
+    const response = await fetch(rawImage(cfg, message.image), { redirect: "manual" });
     check(response.ok && Number(response.headers.get("Content-Length") || 0) <= MAX_IMAGE, 502);
     return new Response(response.body, {
         headers: { "Content-Type": "image/png", "Cache-Control": "no-store", "X-Content-Type-Options": "nosniff" },
@@ -322,7 +336,11 @@ export default {
             return json({ error: 404 }, 404);
         } catch (error) {
             const status = error instanceof Failure ? error.status : 502;
-            return json({ error: status }, status);
+            const upstream = error instanceof Failure ? error.upstream : 0;
+            const diagnostic = { error: status };
+            if (upstream) diagnostic.github_status = upstream;
+            if (error instanceof Failure && error.reason) diagnostic.reason = error.reason;
+            return json(diagnostic, status);
         }
     },
 };
